@@ -15,6 +15,9 @@ from statistics import mean, median
 import sys
 import os
 
+import numpy as np
+from scipy.stats import linregress
+
 from ortools.sat.python import cp_model
 
 DEBUG = int(os.environ.get('ROUND_ROBIN_DEBUG') or 0)
@@ -170,7 +173,8 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
     """
     assert nrounds == len(bracket_in)
 
-    # NOTE: index is zero-based, but inner list values are 1-based
+    # NOTE: index is zero-based, but inner list values are 1-based (this is pretty
+    # ugly--should really FIX!!!)
     team_opps = [[] for _ in range(nteams)]
     all_teams = set(p + 1 for p in range(nteams))
 
@@ -182,23 +186,48 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
             team_opps[p2].append(p1+1)
     assert len(team_opps) == nteams
 
-    stats = []
+    opp_stats = []
     print("\nOpponents by Round")
-    
+
     for p, opps in enumerate(team_opps):
         uniq = set(opps)
         assert len(uniq) == len(opps)
         seed = p + 1
         no_play = all_teams - uniq - set([seed])
         print(f"{seed:2d}: play: {opps}, no play: {sorted(no_play)}")
-        stats.append((min(opps), max(opps), median(opps), mean(opps)))
+        opp_stats.append((min(opps), max(opps), median(opps), mean(opps)))
 
     print("\n        Opponent Stats"
           "\n    Min  Max  Median  Mean"
-          "\n    ---  ---  ------  ----")
-    for idx, st in enumerate(stats):
-        print(f"{idx+1:2d}: {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:4.2f}")
-        
+          "\n    ---  ---  ------  -----")
+    for idx, st in enumerate(opp_stats):
+        print(f"{idx+1:2d}: {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:5.2f}")
+
+    assert len(opp_stats) == nteams
+    opp_data = [st[3] for st in opp_stats]
+    lin_act = linregress(range(nteams), opp_data)
+    #print(f"lin_act: {lin_act}")
+
+    ref_x = [0, nteams]
+    ref_y = [opp_data[0], opp_data[-1]]
+    lin_ref = linregress(ref_x, ref_y)
+    #print(f"lin_ref: {lin_ref}")
+    ref_val = lambda x: lin_ref.slope * x + lin_ref.intercept
+    ref_func = np.vectorize(ref_val)
+    ref_data = ref_func(np.array(range(nteams)))
+
+    mse = ((ref_data - np.array(opp_data)) ** 2).mean()
+    rmse = np.sqrt(mse)
+
+    print("\nSlope (for mean)")
+    print(f"- Reference: {lin_ref.slope:.2f}")
+    print(f"- Actual:    {lin_act.slope:.2f}")
+    print(f"- Pct Diff:  {(lin_ref.slope-lin_act.slope)/lin_ref.slope:.2f}")
+    print("\nLinearity")
+    print(f"- R-Sqaured: {lin_act.rvalue**2:.2f}")
+    print("\nFairness")
+    print(f"- RMSE:      {rmse:.2f}")
+
     # LATER: validate strict ordering of schedule difficulty!!!
     return True
 
@@ -215,7 +244,7 @@ def print_bracket_csv(bracket: list) -> None:
     ``tourn_eval`` (which doesn't really exist yet!).
     """
     for round in bracket:
-        print(','.join([str(team + 1) for table in round for team in table]))
+        print(','.join([str(p + 1) for table in round for p in table]))
 
 ########
 # main #
@@ -247,7 +276,8 @@ def main() -> int:
     if csvout:
         print_bracket_csv(bracket)
     else:
-        print_bracket(bracket)
+        #print_bracket(bracket)
+        pass
     return 0
 
 if __name__ == "__main__":
