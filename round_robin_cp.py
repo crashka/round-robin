@@ -92,52 +92,18 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
                     mtgs.append(mtg)
             model.add(sum(mtgs) < 2)
 
-    # Constraint #4 - additional constraints to pair higher seeds with lower seeds (work
-    # in development--currently very hacky!!!)
-
-    # HACKY: the approach here is to manually tweak for reasonable-looking results (for
-    # linearity and fairness) and then deduce the implied formula!!!
-    sched10 = [( 2, 10),
-               ( 3, 10),
-               ( 4, 10),
-               ( 5, 10),
-               ( 6, 10),
-               ( 7, 10),
-               ( 8, 10),
-               ( 9, 10)]
-    sched12 = [( 4, 12),
-               ( 4, 12),
-               ( 5, 12),
-               ( 6, 12),
-               ( 7, 12),
-               ( 8, 12),
-               ( 9, 12),
-               (10, 12)]
-    sched14 = [( 6, 14),
-               ( 7, 14),
-               ( 8, 14),
-               ( 9, 14),
-               (10, 14),
-               (11, 14),
-               (12, 14),
-               (13, 14)]
-    sched16 = [( 8, 16),
-               ( 9, 16),
-               (10, 16),
-               (11, 16),
-               (12, 16),
-               (13, 16),
-               (14, 16),
-               (15, 16)]
-    scheds = {10: sched10,
-              12: sched12,
-              14: sched14,
-              16: sched16}
-    sched = scheds[tteams]
-
-    for p1, (lo, hi) in enumerate(sched):
+    # Constraint #4 - additional constraints to pair higher seeds with lower seeds--the
+    # current approach is to make sure the top seeds all meet the lowest seed (or ghost),
+    # and loosen the weakness constraints as we go down through the field
+    #
+    # REVISIT: this is not close to optimal (in fact, doesn't even generate reliably
+    # monotonic results), but at least can be expressed compactly.  We'll use this for
+    # now, but definitely need to keep working on a formula that does a better job!!!
+    hi = tteams
+    lo_range = range(hi - nrounds, hi)
+    for p1, lo in enumerate(lo_range):
         for p2 in range(lo, hi):
-            if p2 == p1:
+            if p2 <= p1:
                 continue
             mtgs = mtgs_map[p1][p2]
             model.add(sum(mtgs) == 1)
