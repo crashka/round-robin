@@ -6,7 +6,6 @@ teams are guaranteed to have an easier schedule.
 
 To Do:
 
-- Add stats for measuring linearity and fairness of the solution
 - Fix the kludgy 0-based vs. 1-based team/round stuff in `validate_bracket`
 - Take into account difficulty of opponents in adjacent (or near-adjacent) rounds
 """
@@ -80,9 +79,12 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
             model.add(sum(seats[(p, r, t)] for t in tables) == 1)
 
     # Constraint #3 - every pair of teams meets no more than once across all rounds
+    mtgs_map = {}
     for p1 in all_teams[:-1]:
+        mtgs_map[p1] = {}
         for p2 in all_teams[p1+1:]:
-            mtgs = []
+            mtgs_map[p1][p2] = []
+            mtgs = mtgs_map[p1][p2]
             for r in rounds:
                 for t in tables:
                     mtg = model.new_bool_var(f'mtg_p{p1}_p{p2}_r{r}_t{t}')
@@ -92,38 +94,41 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     # Constraint #4 - additional constraints to pair higher seeds with lower seeds (work
     # in development--currently very hacky!!!)
+
+    # HACKY: the approach here is to manually tweak for reasonable-looking results (for
+    # linearity and fairness) and then deduce the implied formula!!!
     sched10 = [( 2, 10),
-               ( 2, 10),
+               ( 3, 10),
                ( 4, 10),
-               ( 4, 10),
+               ( 5, 10),
                ( 6, 10),
-               ( 6, 10),
+               ( 7, 10),
                ( 8, 10),
-               ( 8, 10)]
+               ( 9, 10)]
     sched12 = [( 4, 12),
                ( 4, 12),
-               ( 4, 12),
-               ( 4, 12),
+               ( 5, 12),
+               ( 6, 12),
+               ( 7, 12),
                ( 8, 12),
-               ( 8, 12),
-               (10, 12),
+               ( 9, 12),
                (10, 12)]
     sched14 = [( 6, 14),
-               ( 6, 14),
-               ( 6, 14),
-               ( 6, 14),
-               ( 6, 14),
-               ( 6, 14),
+               ( 7, 14),
+               ( 8, 14),
+               ( 9, 14),
+               (10, 14),
+               (11, 14),
                (12, 14),
-               (12, 14)]
+               (13, 14)]
     sched16 = [( 8, 16),
-               ( 8, 16),
-               ( 8, 16),
-               ( 8, 16),
+               ( 9, 16),
                (10, 16),
-               (10, 16),
-               (10, 16),
-               (10, 16)]
+               (11, 16),
+               (12, 16),
+               (13, 16),
+               (14, 16),
+               (15, 16)]
     scheds = {10: sched10,
               12: sched12,
               14: sched14,
@@ -132,13 +137,9 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     for p1, (lo, hi) in enumerate(sched):
         for p2 in range(lo, hi):
-            #print(f"{p1} - {p2}")
-            mtgs = []
-            for r in rounds:
-                for t in tables:
-                    mtg = model.new_bool_var(f'mtg_p{p1}_p{p2}_r{r}_t{t}')
-                    model.add_multiplication_equality(mtg, [seats[(p1, r, t)], seats[(p2, r, t)]])
-                    mtgs.append(mtg)
+            if p2 == p1:
+                continue
+            mtgs = mtgs_map[p1][p2]
             model.add(sum(mtgs) == 1)
 
     solver = cp_model.CpSolver()
@@ -162,9 +163,9 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
         raise RuntimeError("Generated bracket fails validation")
 
     print("\nSolver Stats", file=sys.stderr)
-    print(f"- Conflicts : {solver.num_conflicts}", file=sys.stderr)
-    print(f"- Branches  : {solver.num_branches}", file=sys.stderr)
-    print(f"- Wall time : {solver.wall_time:.2f} secs", file=sys.stderr)
+    print(f"- Conflicts: {solver.num_conflicts}", file=sys.stderr)
+    print(f"- Branches:  {solver.num_branches}", file=sys.stderr)
+    print(f"- Wall time: {solver.wall_time:.2f} secs", file=sys.stderr)
     return bracket
 
 def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
@@ -207,6 +208,7 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
     opp_data = [st[3] for st in opp_stats]
     lin_act = linregress(range(nteams), opp_data)
     #print(f"lin_act: {lin_act}")
+    act_val = lambda x: lin_act.slope * x + lin_act.intercept
 
     ref_x = [0, nteams]
     ref_y = [opp_data[0], opp_data[-1]]
@@ -219,10 +221,12 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
     mse = ((ref_data - np.array(opp_data)) ** 2).mean()
     rmse = np.sqrt(mse)
 
-    print("\nSlope (for mean)")
+    print("\nSlope (for Mean)")
     print(f"- Reference: {lin_ref.slope:.2f}")
     print(f"- Actual:    {lin_act.slope:.2f}")
-    print(f"- Pct Diff:  {(lin_ref.slope-lin_act.slope)/lin_ref.slope:.2f}")
+    print(f"- Diff:      {(lin_ref.slope-lin_act.slope)/lin_ref.slope*100.0:.1f}%")
+    print("\nExtrapolated Mean")
+    print(f"- Range:     {act_val(0):.2f} - {act_val(nteams-1):.2f}")
     print("\nLinearity")
     print(f"- R-Sqaured: {lin_act.rvalue**2:.2f}")
     print("\nFairness")
