@@ -63,49 +63,49 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     # Constraint #0 - specify domain for (team, round, table)
     seats = {}
-    for p in all_teams:
+    for t in all_teams:
         for r in rounds:
-            for t in tables:
-                seats[(p, r, t)] = model.new_bool_var(f'seat_p{p}_r{r}_t{t}')
+            for b in tables:
+                seats[(t, r, b)] = model.new_bool_var(f'seat_t{t}_r{r}_b{b}')
 
     # Constraint #1 - for every round, each table seats 2 teams
     for r in rounds:
-        for t in tables:
-            model.add(sum(seats[(p, r, t)] for p in all_teams) == 2)
+        for b in tables:
+            model.add(sum(seats[(t, r, b)] for t in all_teams) == 2)
 
     # Constraint #2 - every team sits at one table per round
-    for p in all_teams:
+    for t in all_teams:
         for r in rounds:
-            model.add(sum(seats[(p, r, t)] for t in tables) == 1)
+            model.add(sum(seats[(t, r, b)] for b in tables) == 1)
 
     # Build variables and maps related to meetings
-    mtgs_map = {p1: {p2: [] for p2 in all_teams} for p1 in all_teams}
-    for p1 in all_teams[:-1]:
-        for p2 in all_teams[p1+1:]:
-            assert p2 > p1
-            assert len(mtgs_map[p1][p2]) == 0
-            mtgs = mtgs_map[p1][p2]
+    mtgs_map = {t1: {t2: None for t2 in all_teams} for t1 in all_teams}
+    for t1 in all_teams[:-1]:
+        for t2 in all_teams[t1 + 1:]:
+            assert t2 > t1
+            assert mtgs_map[t1][t2] is None
+            mtgs = []
             for r in rounds:
-                for t in tables:
-                    mtg = model.new_bool_var(f'mtg_p{p1}_p{p2}_r{r}_t{t}')
-                    model.add_multiplication_equality(mtg, [seats[(p1, r, t)], seats[(p2, r, t)]])
+                for b in tables:
+                    mtg = model.new_bool_var(f'mtg_t{t1}_t{t2}_r{r}_b{b}')
+                    model.add_multiplication_equality(mtg, [seats[(t1, r, b)], seats[(t2, r, b)]])
                     mtgs.append(mtg)
+            mtgs_map[t1][t2] = sum(mtgs)
 
     # Validate and create inverse mappings
-    for p1 in all_teams:
-        for p2 in all_teams[:p1]:
-            assert p2 < p1
-            assert len(mtgs_map[p1][p2]) == 0
-            assert len(mtgs_map[p2][p1]) == nrounds * ntables
-            mtgs_map[p1][p2] = mtgs_map[p2][p1]
-        assert len(mtgs_map[p1][p1]) == 0
+    for t1 in all_teams:
+        assert mtgs_map[t1][t1] is None
+        for t2 in all_teams[:t1]:
+            assert t2 < t1
+            assert mtgs_map[t1][t2] is None
+            assert mtgs_map[t2][t1].num_exprs == nrounds * ntables
+            mtgs_map[t1][t2] = mtgs_map[t2][t1]
 
     # Constraint #3 - every pair of teams meets no more than once across all rounds
-    for p1 in all_teams[:-1]:
-        for p2 in all_teams[p1+1:]:
-            assert p2 > p1
-            mtgs = mtgs_map[p1][p2]
-            model.add(sum(mtgs) < 2)
+    for t1 in all_teams[:-1]:
+        for t2 in all_teams[t1 + 1:]:
+            assert t2 > t1
+            model.add(mtgs_map[t1][t2] < 2)
 
     # Constraint #4 - additional constraints to pair higher seeds with lower seeds--the
     # current approach is to make sure the top seeds all meet the lowest seed (or ghost),
@@ -116,21 +116,23 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     # now, but definitely need to keep working on a formula that does a better job!!!
     hi = tteams
     lo_range = range(hi - nrounds, hi)
-    for p1, lo in enumerate(lo_range):
-        for p2 in range(lo, hi):
-            if p2 <= p1:
+    for t1, lo in enumerate(lo_range):
+        for t2 in range(lo, hi):
+            if t2 <= t1:
                 continue
-            mtgs = mtgs_map[p1][p2]
-            model.add(sum(mtgs) == 1)
+            model.add(mtgs_map[t1][t2] == 1)
 
-    # Constraint #5a - for top half of the bracket, ensure there are more opponents in the
-    # bottom half
+    # Constraint #5a - for top half of the bracket, ensure there are more lower seeded
+    # opponents than higher seeded opponents
+    pass
 
-    # Constraint #5b - for bottom half of the bracket, ensure there are more opponents in
-    # the top half
+    # Constraint #5b - for bottom half of the bracket, ensure there are more higher seeded
+    # opponents than lower seeded opponents
+    pass
 
     # Constraint #6 - optimize for minimum MSE of aggregate opponent stength relative to
     # linear reference
+    pass
 
     solver = cp_model.CpSolver()
     if DEBUG:
@@ -146,8 +148,8 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     bracket = []
     for r in rounds:
         bracket.append([])
-        for t in tables:
-            bracket[-1].append([p for p in all_teams if solver.value(seats[(p, r, t)])])
+        for b in tables:
+            bracket[-1].append([t for t in all_teams if solver.value(seats[(t, r, b)])])
 
     if not validate_bracket(bracket, tteams, nrounds):
         raise RuntimeError("Generated bracket fails validation")
@@ -167,23 +169,23 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
     # NOTE: index is zero-based, but inner list values are 1-based (this is pretty
     # ugly--should really FIX!!!)
     team_opps = [[] for _ in range(nteams)]
-    all_teams = set(p + 1 for p in range(nteams))
+    all_teams = set(t + 1 for t in range(nteams))
 
     for round in bracket_in:
         for table in round:
             assert len(table) == 2
-            p1, p2 = table
-            team_opps[p1].append(p2+1)
-            team_opps[p2].append(p1+1)
+            t1, t2 = table
+            team_opps[t1].append(t2 + 1)
+            team_opps[t2].append(t1 + 1)
     assert len(team_opps) == nteams
 
     opp_stats = []
     print("\nOpponents by Round")
 
-    for p, opps in enumerate(team_opps):
+    for i, opps in enumerate(team_opps):
         uniq = set(opps)
         assert len(uniq) == len(opps)
-        seed = p + 1
+        seed = i + 1
         no_play = all_teams - uniq - set([seed])
         print(f"{seed:2d}: play: {opps}, no play: {sorted(no_play)}")
         opp_stats.append((min(opps), max(opps), median(opps), mean(opps)))
@@ -191,8 +193,8 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
     print("\n        Opponent Stats"
           "\n    Min  Max  Median  Mean"
           "\n    ---  ---  ------  -----")
-    for idx, st in enumerate(opp_stats):
-        print(f"{idx+1:2d}: {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:5.2f}")
+    for i, st in enumerate(opp_stats):
+        print(f"{i + 1:2d}: {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:5.2f}")
 
     assert len(opp_stats) == nteams
     opp_data = [st[3] for st in opp_stats]
@@ -228,17 +230,17 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
 def print_bracket(bracket: list) -> None:
     """Print human-readable representation of the generated backed (internal format).
     """
-    for r, round in enumerate(bracket):
-        print(f"\nRound {r+1}:")
-        for t, table in enumerate(round):
-            print(f"  Table {t+1}: {[p+1 for p in table]}")
+    for i, round in enumerate(bracket):
+        print(f"\nRound {i + 1}:")
+        for j, table in enumerate(round):
+            print(f"  Table {j + 1}: {[t + 1 for t in table]}")
 
 def print_bracket_csv(bracket: list) -> None:
     """Print CSV for generated bracket, compatible with input format expected by
     ``tourn_eval`` (which doesn't really exist yet!).
     """
     for round in bracket:
-        print(','.join([str(p + 1) for table in round for p in table]))
+        print(','.join([str(t + 1) for table in round for t in table]))
 
 ########
 # main #
@@ -247,17 +249,16 @@ def print_bracket_csv(bracket: list) -> None:
 def main() -> int:
     """Usage::
 
-      $ python -m round_robin_cp <nteams> <nrounds> [<csvout>]
+      $ python -m round_robin_cp <nteams> <nrounds> [<brcktout>]
 
-    where any non-empty value for ``csvout`` specifies that the bracket should be output
-    in CSV format (as expected by ``tourn_eval``); otherwise a human-readable version is
-    printed.
+    where any non-empty value for ``brcktout`` specifies the output format for the bracket
+    (i.e. 'cvs' or 'human').
     """
     nteams  = int(sys.argv[1])
     nrounds = int(sys.argv[2])
-    csvout  = None
+    brcktout  = None
     if len(sys.argv) > 3:
-        csvout = bool(sys.argv[3])
+        brcktout = sys.argv[3]
         if len(sys.argv) > 4:
             print(f"Invalid arg(s): {' '.join(sys.argv[4:])}", file=sys.stderr)
             return 1
@@ -267,11 +268,12 @@ def main() -> int:
         print("Unable to build bracket", file=sys.stderr)
         return 1
 
-    if csvout:
+    if not bool(brcktout):
+        pass
+    elif brcktout.lower() == 'csv':
         print_bracket_csv(bracket)
     else:
-        #print_bracket(bracket)
-        pass
+        print_bracket(bracket)
     return 0
 
 if __name__ == "__main__":
