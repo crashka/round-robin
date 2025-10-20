@@ -58,6 +58,7 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     tables    = range(ntables)
     all_teams = range(tteams)  # includes ghosts
     ghosts    = all_teams[nteams:]
+    assert len(ghosts) == nghosts
 
     model = cp_model.CpModel()
 
@@ -67,16 +68,6 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
         for r in rounds:
             for b in tables:
                 seats[(t, r, b)] = model.new_bool_var(f'seat_t{t}_r{r}_b{b}')
-
-    # Constraint #1 - for every round, each table seats 2 teams
-    for r in rounds:
-        for b in tables:
-            model.add(sum(seats[(t, r, b)] for t in all_teams) == 2)
-
-    # Constraint #2 - every team sits at one table per round
-    for t in all_teams:
-        for r in rounds:
-            model.add(sum(seats[(t, r, b)] for b in tables) == 1)
 
     # Build variables and maps related to meetings
     mtgs_map = {t1: {t2: None for t2 in all_teams} for t1 in all_teams}
@@ -100,6 +91,16 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
             assert mtgs_map[t1][t2] is None
             assert mtgs_map[t2][t1].num_exprs == nrounds * ntables
             mtgs_map[t1][t2] = mtgs_map[t2][t1]
+
+    # Constraint #1 - for every round, each table seats 2 teams
+    for r in rounds:
+        for b in tables:
+            model.add(sum(seats[(t, r, b)] for t in all_teams) == 2)
+
+    # Constraint #2 - every team sits at one table per round
+    for t in all_teams:
+        for r in rounds:
+            model.add(sum(seats[(t, r, b)] for b in tables) == 1)
 
     # Constraint #3 - every pair of teams meets no more than once across all rounds
     for t1 in all_teams[:-1]:
@@ -130,7 +131,11 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     # opponents than lower seeded opponents
     pass
 
-    # Constraint #6 - optimize for minimum MSE of aggregate opponent stength relative to
+    # Constraint #6 - ensure that the average opponent seed level (across all rounds) goes
+    # up monotonically as we walk down the seed ladder
+    pass
+
+    # Constraint #7 - optimize for minimum MSE of aggregate opponent stength relative to
     # linear reference
     pass
 
