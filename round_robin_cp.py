@@ -108,36 +108,55 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
             assert t2 > t1
             model.add(mtgs_map[t1][t2] < 2)
 
-    # Constraint #4 - additional constraints to pair higher seeds with lower seeds--the
-    # current approach is to make sure the top seeds all meet the lowest seed (or ghost),
-    # and loosen the weakness constraints as we go down through the field
-    #
-    # REVISIT: this is not close to optimal (in fact, doesn't even generate reliably
-    # monotonic results), but at least can be expressed compactly.  We'll use this for
-    # now, but definitely need to keep working on a formula that does a better job!!!
-    hi = tteams
-    lo_range = range(hi - nrounds, hi)
-    for t1, lo in enumerate(lo_range):
-        for t2 in range(lo, hi):
-            if t2 <= t1:
-                continue
-            model.add(mtgs_map[t1][t2] == 1)
+    # Constraint #4 - if there are byes, ensure that the top seeds get them
+    if ghosts:
+        assert len(ghosts) == 1
+        g = ghosts[0]
+        for t in teams[:nrounds]:
+            model.add(mtgs_map[t][g] == 1)
 
-    # Constraint #5a - for top half of the bracket, ensure there are more lower seeded
-    # opponents than higher seeded opponents
-    pass
+    # Constraint #5a - for top half of the bracket, ensure that at least half of opponents
+    # are lower in rank
+    for t1 in all_teams[:tteams // 2]:
+        lo_teams = all_teams[t1 + 1:]
+        hi_teams = all_teams[:t1]
+        lo_seeds = sum(mtgs_map[t1][t2] for t2 in lo_teams)
+        hi_seeds = sum(mtgs_map[t1][t2] for t2 in hi_teams)
+        model.add(lo_seeds >= hi_seeds)
 
-    # Constraint #5b - for bottom half of the bracket, ensure there are more higher seeded
-    # opponents than lower seeded opponents
-    pass
+    # Constraint #5b - for bottom half of the bracket, ensure that at least half of
+    # opponents are higher in rank
+    for t1 in all_teams[tteams // 2:]:
+        lo_teams = all_teams[t1 + 1:]
+        hi_teams = all_teams[:t1]
+        lo_seeds = sum(mtgs_map[t1][t2] for t2 in lo_teams)
+        hi_seeds = sum(mtgs_map[t1][t2] for t2 in hi_teams)
+        model.add(hi_seeds >= lo_seeds)
 
     # Constraint #6 - ensure that the average opponent seed level (across all rounds) goes
     # up monotonically as we walk down the seed ladder
-    pass
+    sched_strgth = []
+    for t1 in all_teams:
+        opp_strgth = []
+        for t2 in all_teams:
+            if t2 == t1:
+                continue
+            # note: we have to add 1 here to avoid a type error (the backend is too clever
+            # in creating constant linear expressions, which are then type-compatible with
+            # the sum() operation)
+            opp_strgth.append(mtgs_map[t1][t2] * (t2 + 1))
+        sched_strgth.append(sum(opp_strgth))
+
+    for t in all_teams[:-1]:
+        model.add(sched_strgth[t] >= sched_strgth[t + 1])
 
     # Constraint #7 - optimize for minimum MSE of aggregate opponent stength relative to
     # linear reference
     pass
+
+    validation = model.validate()
+    if validation:
+        print(f"Validation Error: {validation}", file=sys.stderr)
 
     solver = cp_model.CpSolver()
     if DEBUG:
