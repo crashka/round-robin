@@ -78,18 +78,33 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
         for r in rounds:
             model.add(sum(seats[(p, r, t)] for t in tables) == 1)
 
-    # Constraint #3 - every pair of teams meets no more than once across all rounds
-    mtgs_map = {}
+    # Build variables and maps related to meetings
+    mtgs_map = {p1: {p2: [] for p2 in all_teams} for p1 in all_teams}
     for p1 in all_teams[:-1]:
-        mtgs_map[p1] = {}
         for p2 in all_teams[p1+1:]:
-            mtgs_map[p1][p2] = []
+            assert p2 > p1
+            assert len(mtgs_map[p1][p2]) == 0
             mtgs = mtgs_map[p1][p2]
             for r in rounds:
                 for t in tables:
                     mtg = model.new_bool_var(f'mtg_p{p1}_p{p2}_r{r}_t{t}')
                     model.add_multiplication_equality(mtg, [seats[(p1, r, t)], seats[(p2, r, t)]])
                     mtgs.append(mtg)
+
+    # Validate and create inverse mappings
+    for p1 in all_teams:
+        for p2 in all_teams[:p1]:
+            assert p2 < p1
+            assert len(mtgs_map[p1][p2]) == 0
+            assert len(mtgs_map[p2][p1]) == nrounds * ntables
+            mtgs_map[p1][p2] = mtgs_map[p2][p1]
+        assert len(mtgs_map[p1][p1]) == 0
+
+    # Constraint #3 - every pair of teams meets no more than once across all rounds
+    for p1 in all_teams[:-1]:
+        for p2 in all_teams[p1+1:]:
+            assert p2 > p1
+            mtgs = mtgs_map[p1][p2]
             model.add(sum(mtgs) < 2)
 
     # Constraint #4 - additional constraints to pair higher seeds with lower seeds--the
@@ -107,6 +122,15 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
                 continue
             mtgs = mtgs_map[p1][p2]
             model.add(sum(mtgs) == 1)
+
+    # Constraint #5a - for top half of the bracket, ensure there are more opponents in the
+    # bottom half
+
+    # Constraint #5b - for bottom half of the bracket, ensure there are more opponents in
+    # the top half
+
+    # Constraint #6 - optimize for minimum MSE of aggregate opponent stength relative to
+    # linear reference
 
     solver = cp_model.CpSolver()
     if DEBUG:
@@ -176,7 +200,7 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
     #print(f"lin_act: {lin_act}")
     act_val = lambda x: lin_act.slope * x + lin_act.intercept
 
-    ref_x = [0, nteams]
+    ref_x = [0, nteams - 1]
     ref_y = [opp_data[0], opp_data[-1]]
     lin_ref = linregress(ref_x, ref_y)
     #print(f"lin_ref: {lin_ref}")
