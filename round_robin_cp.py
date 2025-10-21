@@ -10,16 +10,45 @@ To Do:
 - Take into account difficulty of opponents in adjacent (or near-adjacent) rounds
 """
 
+from collections.abc import Iterable
 from statistics import mean, median
 import sys
 import os
 
 import numpy as np
 from scipy.stats import linregress
+from scipy.stats._stats_py import LinregressResult
 
 from ortools.sat.python import cp_model
 
 DEBUG = int(os.environ.get('ROUND_ROBIN_DEBUG') or 0)
+
+class MeanLinRef:
+    """Reference linear equation for mean opponent seeds
+    """
+    lin_res: LinregressResult
+
+    def __init__(self, nteams: int, nrounds: int, offset: int = 1):
+        ref_min = sum(range(0, nrounds)) / nrounds + offset
+        ref_max = sum(range(nteams - nrounds, nteams)) / nrounds + offset
+        ref_x = [0, nteams - 1]
+        ref_y = [ref_max, ref_min]
+        lin_res = linregress(ref_x, ref_y)
+        #print(f"lin_res: {lin_res}")
+        self.lin_res = lin_res
+
+    @property
+    def slope(self) -> float:
+        return self.lin_res.slope
+
+    @property
+    def intercept(self) -> float:
+        return self.lin_res.intercept
+
+    def y_vals(self, x_vals: Iterable[float]) -> np.array:
+        ref_val = lambda x: self.slope * x + self.intercept
+        ref_func = np.vectorize(ref_val)
+        return ref_func(np.array(x_vals))
 
 def build_bracket(nteams: int, nrounds: int) -> list | None:
     """Attempt to build a bracket with the specified configuration.  Return ``None`` if
@@ -221,20 +250,15 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
         print(f"{i + 1:2d}: {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:5.2f}")
 
     assert len(opp_stats) == nteams
-    opp_data = [st[3] for st in opp_stats]
+    opp_data = np.array([st[3] for st in opp_stats])
     lin_act = linregress(range(nteams), opp_data)
     #print(f"lin_act: {lin_act}")
     act_val = lambda x: lin_act.slope * x + lin_act.intercept
 
-    ref_x = [0, nteams - 1]
-    ref_y = [opp_data[0], opp_data[-1]]
-    lin_ref = linregress(ref_x, ref_y)
-    #print(f"lin_ref: {lin_ref}")
-    ref_val = lambda x: lin_ref.slope * x + lin_ref.intercept
-    ref_func = np.vectorize(ref_val)
-    ref_data = ref_func(np.array(range(nteams)))
+    lin_ref = MeanLinRef(nteams, nrounds)
+    ref_data = lin_ref.y_vals(range(nteams))
 
-    mse = ((ref_data - np.array(opp_data)) ** 2).mean()
+    mse = ((ref_data - opp_data) ** 2).mean()
     rmse = np.sqrt(mse)
 
     print("\nSlope (for Mean)")
