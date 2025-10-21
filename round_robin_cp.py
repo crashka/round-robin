@@ -21,20 +21,33 @@ from scipy.stats._stats_py import LinregressResult
 
 from ortools.sat.python import cp_model
 
-DEBUG = int(os.environ.get('ROUND_ROBIN_DEBUG') or 0)
+# some type aliases
+NDArray       = np.typing.NDArray
+simple_sum    = cp_model.LinearExpr.sum
+weighted_sum  = cp_model.LinearExpr.weighted_sum
+
+DEBUG         = int(os.environ.get('CP_DEBUG') or 0)
+MAX_TIME      = int(os.environ.get('CP_MAX_TIME') or 0)
+SKIP_CONSTR_5 = bool(os.environ.get('CP_SKIP_CONSTR_5') or 0)
 
 class MeanLinRef:
     """Reference linear equation for mean opponent seeds
     """
+    nteams:  int
+    nrounds: int
+    offset:  int
     lin_res: LinregressResult
 
     def __init__(self, nteams: int, nrounds: int, offset: int = 1):
-        ref_min = sum(range(0, nrounds)) / nrounds + offset
-        ref_max = sum(range(nteams - nrounds, nteams)) / nrounds + offset
+        min_y = sum(range(0, nrounds)) / nrounds + offset
+        max_y = sum(range(nteams - nrounds, nteams)) / nrounds + offset
         ref_x = [0, nteams - 1]
-        ref_y = [ref_max, ref_min]
+        ref_y = [max_y, min_y]
         lin_res = linregress(ref_x, ref_y)
         #print(f"lin_res: {lin_res}")
+        self.nteams  = nteams
+        self.nrounds = nrounds
+        self.offset  = offset
         self.lin_res = lin_res
 
     @property
@@ -45,7 +58,7 @@ class MeanLinRef:
     def intercept(self) -> float:
         return self.lin_res.intercept
 
-    def y_vals(self, x_vals: Iterable[float]) -> np.array:
+    def y_vals(self, x_vals: Iterable[float]) -> NDArray:
         ref_val = lambda x: self.slope * x + self.intercept
         ref_func = np.vectorize(ref_val)
         return ref_func(np.array(x_vals))
@@ -144,23 +157,23 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
         for t in teams[:nrounds]:
             model.add(mtgs_map[t][g] == 1)
 
-    # Constraint #5a - for top half of the bracket, ensure that at least half of opponents
-    # are lower in rank
-    for t1 in all_teams[:tteams // 2]:
-        lo_teams = all_teams[t1 + 1:]
-        hi_teams = all_teams[:t1]
-        lo_seeds = sum(mtgs_map[t1][t2] for t2 in lo_teams)
-        hi_seeds = sum(mtgs_map[t1][t2] for t2 in hi_teams)
-        model.add(lo_seeds >= hi_seeds)
+    # Constraint #5 - for top half of the bracket, ensure that at least half of opponents
+    # are lower in rank; and vice versa for bottom half
+    if not SKIP_CONSTR_5:
+        halfway = tteams // 2
+        for t1 in all_teams[:halfway]:
+            lo_teams = all_teams[t1 + 1:]
+            hi_teams = all_teams[:t1]
+            lo_seeds = sum(mtgs_map[t1][t2] for t2 in lo_teams)
+            hi_seeds = sum(mtgs_map[t1][t2] for t2 in hi_teams)
+            model.add(lo_seeds >= hi_seeds)
 
-    # Constraint #5b - for bottom half of the bracket, ensure that at least half of
-    # opponents are higher in rank
-    for t1 in all_teams[tteams // 2:]:
-        lo_teams = all_teams[t1 + 1:]
-        hi_teams = all_teams[:t1]
-        lo_seeds = sum(mtgs_map[t1][t2] for t2 in lo_teams)
-        hi_seeds = sum(mtgs_map[t1][t2] for t2 in hi_teams)
-        model.add(hi_seeds >= lo_seeds)
+        for t1 in all_teams[halfway:]:
+            lo_teams = all_teams[t1 + 1:]
+            hi_teams = all_teams[:t1]
+            lo_seeds = sum(mtgs_map[t1][t2] for t2 in lo_teams)
+            hi_seeds = sum(mtgs_map[t1][t2] for t2 in hi_teams)
+            model.add(hi_seeds >= lo_seeds)
 
     # Constraint #6 - ensure that the average opponent seed level (across all rounds) goes
     # up monotonically as we walk down the seed ladder
@@ -181,7 +194,18 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     # Constraint #7 - optimize for minimum MSE of aggregate opponent stength relative to
     # linear reference
-    pass
+    lin_ref = MeanLinRef(nteams, nrounds)
+    ref_data = lin_ref.y_vals(range(tteams))
+    ref_max = int(ref_data[0] * nrounds + 0.5)
+    err_all = []
+    for t in all_teams:
+        ref_val = int(ref_data[t] * nrounds + 0.5)
+        err = model.new_int_var(-ref_max, ref_max, f'err{t}')
+        model.add(err == sched_strgth[t] - ref_val)
+        err_sq = model.new_int_var(0, ref_max ** 2, f'err_sq{t}')
+        model.add_multiplication_equality(err_sq, [err, err])
+        err_all.append(err_sq)
+    model.minimize(sum(err_all))
 
     validation = model.validate()
     if validation:
@@ -192,6 +216,8 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
         solver.parameters.log_search_progress = True
         if DEBUG > 1:
             solver.parameters.log_subsolver_statistics = True
+    if MAX_TIME:
+        solver.parameters.max_time_in_seconds = MAX_TIME
     status = solver.solve(model)
     print(f"Status: {status} ({solver.status_name(status)})", file=sys.stderr)
 
@@ -268,9 +294,9 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
     print("\nExtrapolated Mean")
     print(f"- Range:     {act_val(0):.2f} - {act_val(nteams-1):.2f}")
     print("\nLinearity")
-    print(f"- R-Sqaured: {lin_act.rvalue**2:.2f}")
+    print(f"- R-Sqaured: {lin_act.rvalue**2:.3f}")
     print("\nFairness")
-    print(f"- RMSE:      {rmse:.2f}")
+    print(f"- RMSE:      {rmse:.3f}")
 
     # LATER: validate strict ordering of schedule difficulty!!!
     return True
