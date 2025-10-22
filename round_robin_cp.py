@@ -22,13 +22,14 @@ from scipy.stats._stats_py import LinregressResult
 from ortools.sat.python import cp_model
 
 # some type aliases
-NDArray       = np.typing.NDArray
-simple_sum    = cp_model.LinearExpr.sum
-weighted_sum  = cp_model.LinearExpr.weighted_sum
+NDArray      = np.typing.NDArray
+simple_sum   = cp_model.LinearExpr.sum
+weighted_sum = cp_model.LinearExpr.weighted_sum
 
-DEBUG         = int(os.environ.get('CP_DEBUG') or 0)
-MAX_TIME      = int(os.environ.get('CP_MAX_TIME') or 0)
-SKIP_CONSTR_5 = bool(os.environ.get('CP_SKIP_CONSTR_5') or 0)
+DEBUG       = int(os.environ.get('CP_DEBUG') or 0)
+MAX_TIME    = int(os.environ.get('CP_MAX_TIME') or 0)
+SKIP_CONSTR = os.environ.get('CP_SKIP_CONSTR')
+skip_constr = SKIP_CONSTR.split(',') if SKIP_CONSTR else []
 
 class MeanLinRef:
     """Reference linear equation for mean opponent seeds
@@ -134,6 +135,20 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
             assert mtgs_map[t2][t1].num_exprs == nrounds * ntables
             mtgs_map[t1][t2] = mtgs_map[t2][t1]
 
+    # Build map representing strength of schedule for each team
+    sched_strgth = {t: None for t in all_teams}
+    for t1 in all_teams:
+        assert sched_strgth[t1] is None
+        opp_strgth = []
+        for t2 in all_teams:
+            if t2 == t1:
+                continue
+            # note: we have to add 1 here to avoid a type error (the backend is too clever
+            # in creating constant linear expressions, which are then type-compatible with
+            # the sum() operation)
+            opp_strgth.append(mtgs_map[t1][t2] * (t2 + 1))
+        sched_strgth[t1] = sum(opp_strgth)
+
     # Constraint #1 - for every round, each table seats 2 teams
     for r in rounds:
         for b in tables:
@@ -159,7 +174,7 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     # Constraint #5 - for top half of the bracket, ensure that at least half of opponents
     # are lower in rank; and vice versa for bottom half
-    if not SKIP_CONSTR_5:
+    if '5' not in skip_constr:
         halfway = tteams // 2
         for t1 in all_teams[:halfway]:
             lo_teams = all_teams[t1 + 1:]
@@ -177,20 +192,9 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     # Constraint #6 - ensure that the average opponent seed level (across all rounds) goes
     # up monotonically as we walk down the seed ladder
-    sched_strgth = []
-    for t1 in all_teams:
-        opp_strgth = []
-        for t2 in all_teams:
-            if t2 == t1:
-                continue
-            # note: we have to add 1 here to avoid a type error (the backend is too clever
-            # in creating constant linear expressions, which are then type-compatible with
-            # the sum() operation)
-            opp_strgth.append(mtgs_map[t1][t2] * (t2 + 1))
-        sched_strgth.append(sum(opp_strgth))
-
-    for t in all_teams[:-1]:
-        model.add(sched_strgth[t] >= sched_strgth[t + 1])
+    if '6' not in skip_constr:
+        for t in all_teams[:-1]:
+            model.add(sched_strgth[t] >= sched_strgth[t + 1])
 
     # Constraint #7 - optimize for minimum MSE of aggregate opponent stength relative to
     # linear reference
