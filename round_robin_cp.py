@@ -12,6 +12,7 @@ To Do:
 
 from collections.abc import Iterable
 from statistics import mean, median
+from math import sqrt
 import sys
 import os
 
@@ -21,6 +22,9 @@ from scipy.stats._stats_py import LinregressResult
 
 from ortools.sat.python import cp_model
 
+# Constants
+DFLT_PREC_MULT = 10
+
 # some type aliases
 NDArray      = np.typing.NDArray
 simple_sum   = cp_model.LinearExpr.sum
@@ -28,6 +32,7 @@ weighted_sum = cp_model.LinearExpr.weighted_sum
 
 DEBUG       = int(os.environ.get('CP_DEBUG') or 0)
 MAX_TIME    = int(os.environ.get('CP_MAX_TIME') or 0)
+PREC_MULT   = int(os.environ.get('CP_PREC_MULT') or DFLT_PREC_MULT)
 SKIP_CONSTR = os.environ.get('CP_SKIP_CONSTR')
 skip_constr = SKIP_CONSTR.split(',') if SKIP_CONSTR else []
 
@@ -83,8 +88,15 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     3. Pairs of teams may not sit at the same table in more than one round (including the
        ghost)
 
-    4. Additional constraints programmatically generated to generally pair higher seeds
-       with lower seeds (ATTN: algorithm still in development!)
+    4. Ensure that top teams get the byes (if any)
+
+    5. Ensure that more top-half teams face more lower-ranked opponents, and vice versa
+    for bottom-half teams
+
+    6. Ensure that strength of schedule monotonically decreases as we walk down the seed
+    ladder
+
+    7. Optimize for minimum MSE of aggregate opponent stength relative to linear reference
     """
     assert nteams > nrounds
     assert nteams <= 2 * nrounds
@@ -104,6 +116,8 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     assert len(ghosts) == nghosts
 
     model = cp_model.CpModel()
+    if skip_constr:
+        print(f"Skipping constraints: {skip_constr}", file=sys.stderr)
 
     # Constraint #0 - specify domain for (team, round, table)
     seats = {}
@@ -172,8 +186,8 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
         for t in teams[:nrounds]:
             model.add(mtgs_map[t][g] == 1)
 
-    # Constraint #5 - for top half of the bracket, ensure that at least half of opponents
-    # are lower in rank; and vice versa for bottom half
+    # Constraint #5 - for top-half teams, ensure that at least half of opponents are lower
+    # in rank; and vice versa for bottom-half teams
     if '5' not in skip_constr:
         halfway = tteams // 2
         for t1 in all_teams[:halfway]:
@@ -198,18 +212,27 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     # Constraint #7 - optimize for minimum MSE of aggregate opponent stength relative to
     # linear reference
-    lin_ref = MeanLinRef(nteams, nrounds)
+    lin_ref = MeanLinRef(tteams, nrounds)
     ref_data = lin_ref.y_vals(range(tteams))
     ref_max = int(ref_data[0] * nrounds + 0.5)
-    err_all = []
+    err_arr = []
+    err_sq_arr = []
+    ref_vals = []
+
+    # error (and hence RMSE) calculations need higher resolution than accorded by integer
+    # math--I have found that multiplying integers by 10 is generally sufficient
+    mult = PREC_MULT
     for t in all_teams:
-        ref_val = int(ref_data[t] * nrounds + 0.5)
-        err = model.new_int_var(-ref_max, ref_max, f'err{t}')
-        model.add(err == sched_strgth[t] - ref_val)
-        err_sq = model.new_int_var(0, ref_max ** 2, f'err_sq{t}')
+        ref_val = int(ref_data[t] * nrounds * mult + 0.5)
+        err = model.new_int_var(-ref_max * mult, ref_max * mult, f'err{t}')
+        model.add(err == sched_strgth[t] * mult - ref_val)
+        err_sq = model.new_int_var(0, (ref_max * mult) ** 2, f'err_sq{t}')
         model.add_multiplication_equality(err_sq, [err, err])
-        err_all.append(err_sq)
-    model.minimize(sum(err_all))
+        err_arr.append(err)
+        err_sq_arr.append(err_sq)
+        ref_vals.append(ref_val)
+    if '7' not in skip_constr:
+        model.minimize(sum(err_sq_arr))
 
     validation = model.validate()
     if validation:
@@ -227,6 +250,18 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
+
+    obj_val = solver.objective_value
+
+    v = solver.value
+    err_sq_sum = 0
+    for t in all_teams:
+        ref_val = int(ref_data[t] * nrounds + 0.5)
+        err_sq_sum += v(err_sq_arr[t])
+        #print(f"{v(sched_strgth[t]) * mult}  {ref_vals[t]}  {v(err_arr[t])}  {v(err_sq_arr[t])}")
+    err_sq_norm = err_sq_sum / nrounds ** 2 / mult ** 2
+    rmse = sqrt(err_sq_norm / tteams)
+    print(f"SE Sum: {err_sq_norm:.3f}, RMSE: {rmse:.3f}", file=sys.stderr)
 
     bracket = []
     for r in rounds:
@@ -273,22 +308,27 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
         print(f"{seed:2d}: play: {opps}, no play: {sorted(no_play)}")
         opp_stats.append((min(opps), max(opps), median(opps), mean(opps)))
 
-    print("\n        Opponent Stats"
-          "\n    Min  Max  Median  Mean"
-          "\n    ---  ---  ------  -----")
+    lin_ref = MeanLinRef(nteams, nrounds)
+    ref_data = lin_ref.y_vals(range(nteams))
+    err_sq_sum = 0.0
+
+    print("\n               Opponent Stats"
+          "\n    Min  Max  Median  Mean    Ref    Err"
+          "\n    ---  ---  ------  -----  -----  -----")
     for i, st in enumerate(opp_stats):
-        print(f"{i + 1:2d}: {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:5.2f}")
+        act_val = st[3]
+        ref_val = float(ref_data[i])
+        err = act_val - ref_val
+        err_sq_sum += err * err
+        print(f"{i + 1:2d}: {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:5.2f}  "
+              f"{ref_val:5.2f}  {err:5.2f}")
 
     assert len(opp_stats) == nteams
     opp_data = np.array([st[3] for st in opp_stats])
     lin_act = linregress(range(nteams), opp_data)
-    #print(f"lin_act: {lin_act}")
     act_val = lambda x: lin_act.slope * x + lin_act.intercept
 
-    lin_ref = MeanLinRef(nteams, nrounds)
-    ref_data = lin_ref.y_vals(range(nteams))
-
-    mse = ((ref_data - opp_data) ** 2).mean()
+    mse = ((opp_data - ref_data) ** 2).mean()
     rmse = np.sqrt(mse)
 
     print("\nSlope (for Mean)")
@@ -300,6 +340,7 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
     print("\nLinearity")
     print(f"- R-Sqaured: {lin_act.rvalue**2:.3f}")
     print("\nFairness")
+    print(f"- SE Sum:    {err_sq_sum:.3f}")
     print(f"- RMSE:      {rmse:.3f}")
 
     # LATER: validate strict ordering of schedule difficulty!!!
