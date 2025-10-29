@@ -23,18 +23,17 @@ from scipy.stats._stats_py import LinregressResult
 from ortools.sat.python import cp_model
 
 # Constants
-DFLT_PREC_MULT = 10
+DFLT_PREC_MULT = 10  # appears to work well
 
-# some type aliases
+# Type aliases
 NDArray      = np.typing.NDArray
 simple_sum   = cp_model.LinearExpr.sum
 weighted_sum = cp_model.LinearExpr.weighted_sum
 
-DEBUG       = int(os.environ.get('CP_DEBUG') or 0)
-MAX_TIME    = int(os.environ.get('CP_MAX_TIME') or 0)
-PREC_MULT   = int(os.environ.get('CP_PREC_MULT') or DFLT_PREC_MULT)
-SKIP_CONSTR = os.environ.get('CP_SKIP_CONSTR')
-skip_constr = SKIP_CONSTR.split(',') if SKIP_CONSTR else []
+DEBUG        = int(os.environ.get('CP_DEBUG') or 0)
+MAX_TIME     = int(os.environ.get('CP_MAX_TIME') or 0)
+PREC_MULT    = int(os.environ.get('CP_PREC_MULT') or DFLT_PREC_MULT)
+SKIP_CONSTR  = os.environ.get('CP_SKIP_CONSTR')
 
 class MeanLinRef:
     """Reference linear equation for mean opponent seeds
@@ -70,9 +69,9 @@ class MeanLinRef:
         return ref_func(np.array(x_vals))
 
 def build_bracket(nteams: int, nrounds: int) -> list | None:
-    """Attempt to build a bracket with the specified configuration.  Return ``None`` if
-    solver is unable to come up with a solution given the specified parameters and/or
-    bounds.
+    """Attempt to build a bracket with the specified configuration.  Bracket output format
+    is a list (rounds) of lists (tables) of 2-tuple (teams).  Returns ``None`` if solver
+    is unable to come up with a solution given the specified parameters and/or bounds.
 
     If the number of teams is odd, then a "ghost" team is created to pair with the bye
     team for each round.
@@ -97,6 +96,7 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     ladder
 
     7. Optimize for minimum MSE of aggregate opponent stength relative to linear reference
+
     """
     assert nteams > nrounds
     assert nteams <= 2 * nrounds
@@ -116,6 +116,7 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     assert len(ghosts) == nghosts
 
     model = cp_model.CpModel()
+    skip_constr = SKIP_CONSTR.split(',') if SKIP_CONSTR else []
     if skip_constr:
         print(f"Skipping constraints: {skip_constr}", file=sys.stderr)
 
@@ -220,7 +221,7 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     ref_vals = []
 
     # error (and hence RMSE) calculations need higher resolution than accorded by integer
-    # math--I have found that multiplying integers by 10 is generally sufficient
+    # math, so we use a multiplier to get the precision we need
     mult = PREC_MULT
     for t in all_teams:
         ref_val = int(ref_data[t] * nrounds * mult + 0.5)
@@ -267,7 +268,8 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     for r in rounds:
         bracket.append([])
         for b in tables:
-            bracket[-1].append([t for t in all_teams if solver.value(seats[(t, r, b)])])
+            seating = tuple(t for t in all_teams if solver.value(seats[(t, r, b)]))
+            bracket[-1].append(seating)
 
     if not validate_bracket(bracket, tteams, nrounds):
         raise RuntimeError("Generated bracket fails validation")
