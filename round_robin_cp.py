@@ -76,7 +76,7 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     If the number of teams is odd, then a "ghost" team is created to pair with the bye
     team for each round.
 
-    NOTE: this function currently only works for nrounds < nteams < 2 * nrounds
+    NOTE: this function currently only works for nrounds < nteams (see constraint #3)
 
     Constraints:
 
@@ -99,7 +99,6 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     """
     assert nteams > nrounds
-    assert nteams <= 2 * nrounds
 
     nopps   = nteams - 1
     ntables = nopps // 2 + 1
@@ -213,27 +212,27 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     # Constraint #7 - optimize for minimum MSE of aggregate opponent stength relative to
     # linear reference
-    lin_ref = MeanLinRef(tteams, nrounds)
+    lin_ref  = MeanLinRef(tteams, nrounds)
     ref_data = lin_ref.y_vals(range(tteams))
-    ref_max = int(ref_data[0] * nrounds + 0.5)
-    err_arr = []
-    err_sq_arr = []
+    ref_max  = int(ref_data[0] * nrounds + 0.5)
+    errs     = []
+    err_sqs  = []
     ref_vals = []
 
     # error (and hence RMSE) calculations need higher resolution than accorded by integer
     # math, so we use a multiplier to get the precision we need
     mult = PREC_MULT
     for t in all_teams:
-        ref_val = int(ref_data[t] * nrounds * mult + 0.5)
         err = model.new_int_var(-ref_max * mult, ref_max * mult, f'err{t}')
-        model.add(err == sched_strgth[t] * mult - ref_val)
         err_sq = model.new_int_var(0, (ref_max * mult) ** 2, f'err_sq{t}')
+        ref_val = int(ref_data[t] * nrounds * mult + 0.5)
+        model.add(err == sched_strgth[t] * mult - ref_val)
         model.add_multiplication_equality(err_sq, [err, err])
-        err_arr.append(err)
-        err_sq_arr.append(err_sq)
+        errs.append(err)
+        err_sqs.append(err_sq)
         ref_vals.append(ref_val)
     if '7' not in skip_constr:
-        model.minimize(sum(err_sq_arr))
+        model.minimize(sum(err_sqs))
 
     validation = model.validate()
     if validation:
@@ -258,8 +257,8 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     err_sq_sum = 0
     for t in all_teams:
         ref_val = int(ref_data[t] * nrounds + 0.5)
-        err_sq_sum += v(err_sq_arr[t])
-        #print(f"{v(sched_strgth[t]) * mult}  {ref_vals[t]}  {v(err_arr[t])}  {v(err_sq_arr[t])}")
+        err_sq_sum += v(err_sqs[t])
+        #print(f"{v(sched_strgth[t]) * mult}  {ref_vals[t]}  {v(errs[t])}  {v(err_sqs[t])}")
     err_sq_norm = err_sq_sum / nrounds ** 2 / mult ** 2
     rmse = sqrt(err_sq_norm / tteams)
     print(f"SE Sum: {err_sq_norm:.3f}, RMSE: {rmse:.3f}", file=sys.stderr)
