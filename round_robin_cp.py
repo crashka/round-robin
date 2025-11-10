@@ -212,25 +212,28 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
 
     # Constraint #7 - optimize for minimum MSE of aggregate opponent stength relative to
     # linear reference
+
+    # Error (and hence RMSE) calculations need higher resolution than accorded by integer
+    # math, so we use a multiplier to get the precision we need
+    mult = PREC_MULT
+
     lin_ref  = MeanLinRef(tteams, nrounds)
     ref_data = lin_ref.y_vals(range(tteams))
-    ref_max  = int(ref_data[0] * nrounds + 0.5)
+    ref_max  = round(ref_data[0] * nrounds)
     errs     = []
     err_sqs  = []
     ref_vals = []
 
-    # error (and hence RMSE) calculations need higher resolution than accorded by integer
-    # math, so we use a multiplier to get the precision we need
-    mult = PREC_MULT
     for t in all_teams:
         err = model.new_int_var(-ref_max * mult, ref_max * mult, f'err{t}')
         err_sq = model.new_int_var(0, (ref_max * mult) ** 2, f'err_sq{t}')
-        ref_val = int(ref_data[t] * nrounds * mult + 0.5)
+        ref_val = round(ref_data[t] * nrounds * mult)
         model.add(err == sched_strgth[t] * mult - ref_val)
         model.add_multiplication_equality(err_sq, [err, err])
         errs.append(err)
         err_sqs.append(err_sq)
         ref_vals.append(ref_val)
+
     if '7' not in skip_constr:
         model.minimize(sum(err_sqs))
 
@@ -256,7 +259,7 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     v = solver.value
     err_sq_sum = 0
     for t in all_teams:
-        ref_val = int(ref_data[t] * nrounds + 0.5)
+        ref_val = round(ref_data[t] * nrounds)
         err_sq_sum += v(err_sqs[t])
         #print(f"{v(sched_strgth[t]) * mult}  {ref_vals[t]}  {v(errs[t])}  {v(err_sqs[t])}")
     err_sq_norm = err_sq_sum / nrounds ** 2 / mult ** 2
