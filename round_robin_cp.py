@@ -43,13 +43,15 @@ class MeanLinRef:
     offset:  int
     lin_res: LinregressResult
 
-    def __init__(self, nteams: int, nrounds: int, offset: int = 1):
+    def __init__(self, nteams: int, nrounds: int, offset: int = 0):
+        """`offset` represents number for highest ranked seed (typically 0 or 1)
+        """
         min_y = sum(range(0, nrounds)) / nrounds + offset
         max_y = sum(range(nteams - nrounds, nteams)) / nrounds + offset
         ref_x = [0, nteams - 1]
         ref_y = [max_y, min_y]
         lin_res = linregress(ref_x, ref_y)
-        #print(f"lin_res: {lin_res}")
+
         self.nteams  = nteams
         self.nrounds = nrounds
         self.offset  = offset
@@ -67,6 +69,20 @@ class MeanLinRef:
         ref_val = lambda x: self.slope * x + self.intercept
         ref_func = np.vectorize(ref_val)
         return ref_func(np.array(x_vals))
+
+class MeanLinTgt(MeanLinRef):
+    """Target linear equation for mean opponent seeds (based on endpoints)
+    """
+    y_range: tuple[int, int]
+
+    def __init__(self, nteams: int, y_range: tuple[int, int]):
+        ref_x = [0, nteams - 1]
+        ref_y = list(y_range)
+        lin_res = linregress(ref_x, ref_y)
+
+        self.nteams  = nteams
+        self.y_range = y_range
+        self.lin_res = lin_res
 
 def build_bracket(nteams: int, nrounds: int) -> list | None:
     """Attempt to build a bracket with the specified configuration.  Bracket output format
@@ -157,9 +173,10 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
         for t2 in all_teams:
             if t2 == t1:
                 continue
-            # note: we have to add 1 here to avoid a type error (the backend is too clever
-            # in creating constant linear expressions, which are then type-compatible with
-            # the sum() operation)
+            # NOTE: we have to add 1 here to avoid a type error (the backend is too clever
+            # in presumptively creating constant linear expressions for zeros, which are
+            # then incompatible with the sum() operation)--IMPORTANT: the offset used in
+            # constructing `lin_ref` (below) must accord with this number!!!
             opp_strgth.append(mtgs_map[t1][t2] * (t2 + 1))
         sched_strgth[t1] = sum(opp_strgth)
 
@@ -205,36 +222,69 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
             model.add(hi_seeds >= lo_seeds)
 
     # Constraint #6 - ensure that the average opponent seed level (across all rounds) goes
-    # up monotonically as we walk down the seed ladder
+    # up (strictly) monotonically as we walk down the seed ladder
     if '6' not in skip_constr:
         for t in all_teams[:-1]:
-            model.add(sched_strgth[t] >= sched_strgth[t + 1])
+            model.add(sched_strgth[t] > sched_strgth[t + 1])
 
-    # Constraint #7 - optimize for minimum MSE of aggregate opponent stength relative to
-    # linear reference
+    # Constraint #7 - optimize for measured linearity (in addition to minimum MSE of
+    # aggregate opponent stength relative to an ideal linear reference)
 
     # Error (and hence RMSE) calculations need higher resolution than accorded by integer
     # math, so we use a multiplier to get the precision we need
     mult = PREC_MULT
 
-    lin_ref  = MeanLinRef(tteams, nrounds)
+    lin_ref  = MeanLinRef(tteams, nrounds, offset=1)
     ref_data = lin_ref.y_vals(range(tteams))
     ref_max  = round(ref_data[0] * nrounds)
     errs     = []
     err_sqs  = []
     ref_vals = []
 
+    if '7' not in skip_constr:
+        # create "target" linear reference between actual endpoints
+        tgt_first   = sched_strgth[0]
+        tgt_last    = sched_strgth[tteams - 1]
+        tgt_slope   = model.new_int_var(-ref_max, 0, f'tgt_slope')
+        # note: we are *not* dividing by `tteams - 1`, so representation of slope will be
+        # high by a multiplicative factor of `slope_mult`
+        model.add(tgt_slope == tgt_last - tgt_first)
+        slope_mult  = tteams - 1
+        tgt_intcpt  = tgt_first * slope_mult          # normalize to slope
+        tgt_errs    = []
+        tgt_err_sqs = []
+        tgt_vals    = []
+
     for t in all_teams:
+        # convert mean ref_data to ideal value for the sum
+        ref_val = round(ref_data[t] * nrounds * mult)
+        # compute err^2 against ideal linear reference
         err = model.new_int_var(-ref_max * mult, ref_max * mult, f'err{t}')
         err_sq = model.new_int_var(0, (ref_max * mult) ** 2, f'err_sq{t}')
-        ref_val = round(ref_data[t] * nrounds * mult)
         model.add(err == sched_strgth[t] * mult - ref_val)
         model.add_multiplication_equality(err_sq, [err, err])
         errs.append(err)
         err_sqs.append(err_sq)
         ref_vals.append(ref_val)
 
+        if '7' not in skip_constr:
+            # compute linear target value for the sum
+            tgt_num = model.new_int_var(0, ref_max * slope_mult * mult, f'tgt_num{t}')
+            tgt_val = model.new_int_var(0, ref_max * mult, f'tgt_val{t}')
+            model.add(tgt_num == tgt_slope * t * mult + tgt_intcpt * mult)
+            model.add_division_equality(tgt_val, tgt_num, slope_mult)
+            # compute err^2 against linear target reference
+            tgt_err = model.new_int_var(-ref_max * mult, ref_max * mult, f'tgt_err{t}')
+            tgt_err_sq = model.new_int_var(0, (ref_max * mult) ** 2, f'tgt_err_sq{t}')
+            model.add(tgt_err == sched_strgth[t] * mult - tgt_val)
+            model.add_multiplication_equality(tgt_err_sq, [tgt_err, tgt_err])
+            tgt_errs.append(tgt_err)
+            tgt_err_sqs.append(tgt_err_sq)
+            tgt_vals.append(tgt_val)
+
     if '7' not in skip_constr:
+        model.minimize(sum(err_sqs + tgt_err_sqs))
+    else:
         model.minimize(sum(err_sqs))
 
     validation = model.validate()
@@ -259,12 +309,24 @@ def build_bracket(nteams: int, nrounds: int) -> list | None:
     v = solver.value
     err_sq_sum = 0
     for t in all_teams:
-        ref_val = round(ref_data[t] * nrounds)
         err_sq_sum += v(err_sqs[t])
-        #print(f"{v(sched_strgth[t]) * mult}  {ref_vals[t]}  {v(errs[t])}  {v(err_sqs[t])}")
+        # sched_strgth and ref_vals have multiplers of (mult * nrounds)
+        print(f"{v(sched_strgth[t]) * mult:5d} {ref_vals[t]:5d} {v(errs[t]):5d} "
+              f"{v(err_sqs[t]):5d}", file=sys.stderr)
     err_sq_norm = err_sq_sum / nrounds ** 2 / mult ** 2
     rmse = sqrt(err_sq_norm / tteams)
-    print(f"SE Sum: {err_sq_norm:.3f}, RMSE: {rmse:.3f}", file=sys.stderr)
+    print(f"MSE: {err_sq_norm:.3f}, RMSE: {rmse:.3f}", file=sys.stderr)
+
+    if '7' not in skip_constr:
+        err_sq_sum = 0
+        for t in all_teams:
+            err_sq_sum += v(tgt_err_sqs[t])
+            # sched_strgth and ref_vals have multiplers of (mult * nrounds)
+            print(f"{v(sched_strgth[t]) * mult:5d} {v(tgt_vals[t]):5d} {v(tgt_errs[t]):5d} "
+                  f"{v(tgt_err_sqs[t]):5d}", file=sys.stderr)
+        err_sq_norm = err_sq_sum / nrounds ** 2 / mult ** 2
+        rmse = sqrt(err_sq_norm / tteams)
+        print(f"MSE: {err_sq_norm:.3f}, RMSE: {rmse:.3f}", file=sys.stderr)
 
     bracket = []
     for r in rounds:
@@ -312,40 +374,56 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
         print(f"{seed:2d}: play: {opps}, no play: {sorted(no_play)}")
         opp_stats.append((min(opps), max(opps), median(opps), mean(opps)))
 
-    lin_ref = MeanLinRef(nteams, nrounds)
+    lin_ref = MeanLinRef(nteams, nrounds, offset=1)
     ref_data = lin_ref.y_vals(range(nteams))
-    err_sq_sum = 0.0
+    ref_err_sq_sum = 0.0
 
-    print("\n               Opponent Stats"
-          "\n    Min  Max  Median  Mean    Ref    Err"
-          "\n    ---  ---  ------  -----  -----  -----")
+    tgt_range = (opp_stats[0][3], opp_stats[-1][3])
+    lin_tgt = MeanLinTgt(nteams, tgt_range)
+    tgt_data = lin_tgt.y_vals(range(nteams))
+    tgt_err_sq_sum = 0.0
+
+    print("\n                      Opponent Stats"
+          "\n    Min  Max  Median  Mean    Ref   R-Err   Tgt   T-Err"
+          "\n    ---  ---  ------  -----  -----  -----  -----  -----")
     for i, st in enumerate(opp_stats):
         act_val = st[3]
         ref_val = float(ref_data[i])
-        err = act_val - ref_val
-        err_sq_sum += err * err
-        print(f"{i + 1:2d}: {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:5.2f}  "
-              f"{ref_val:5.2f}  {err:5.2f}")
+        ref_err = act_val - ref_val
+        ref_err_sq_sum += ref_err * ref_err
+        tgt_val = float(tgt_data[i])
+        tgt_err = act_val - tgt_val
+        tgt_err_sq_sum += tgt_err * tgt_err
+        print(f"{i+1:2d}  {st[0]:3d}  {st[1]:3d}  {st[2]:6.2f}  {st[3]:5.2f}  "
+              f"{ref_val:5.2f}  {ref_err:5.2f}  {tgt_val:5.2f}  {tgt_err:5.2f}")
 
     assert len(opp_stats) == nteams
     opp_data = np.array([st[3] for st in opp_stats])
-    lin_act = linregress(range(nteams), opp_data)
-    act_val = lambda x: lin_act.slope * x + lin_act.intercept
+    lin_regr = linregress(range(nteams), opp_data)
+    slope_diff_ref = (lin_regr.slope - lin_ref.slope) / lin_ref.slope * 100.0
+    slope_diff_tgt = (lin_regr.slope - lin_tgt.slope) / lin_tgt.slope * 100.0
+    regr_val = lambda x: lin_regr.slope * x + lin_regr.intercept
 
-    mse = ((opp_data - ref_data) ** 2).mean()
-    rmse = np.sqrt(mse)
+    ref_mse = ((opp_data - ref_data) ** 2).mean()
+    ref_rmse = np.sqrt(ref_mse)
+    tgt_mse = ((opp_data - tgt_data) ** 2).mean()
+    tgt_rmse = np.sqrt(tgt_mse)
 
-    print("\nSlope (for Mean)")
-    print(f"- Reference: {lin_ref.slope:.2f}")
-    print(f"- Actual:    {lin_act.slope:.2f}")
-    print(f"- Diff:      {(lin_ref.slope-lin_act.slope)/lin_ref.slope*100.0:.1f}%")
-    print("\nExtrapolated Mean")
-    print(f"- Range:     {act_val(0):.2f} - {act_val(nteams-1):.2f}")
-    print("\nLinearity")
-    print(f"- R-Sqaured: {lin_act.rvalue**2:.3f}")
-    print("\nFairness")
-    print(f"- SE Sum:    {err_sq_sum:.3f}")
-    print(f"- RMSE:      {rmse:.3f}")
+    print("\nFairness (vs Ref)")
+    print(f"- MSE:       {ref_err_sq_sum:.3f}")
+    print(f"- RMSE:      {ref_rmse:.3f}")
+
+    print("\nFitness (vs Tgt)")
+    print(f"- MSE:       {tgt_err_sq_sum:.3f}")
+    print(f"- RMSE:      {tgt_rmse:.3f}")
+
+    print("\nRegression Stats")
+    print(f"- Slope:     {lin_regr.slope:.3f}")
+    print(f"  - vs Ref:  {slope_diff_ref:.1f}% (value: {lin_ref.slope:.3f})")
+    print(f"  - vs Tgt:  {slope_diff_tgt:.1f}% (value: {lin_tgt.slope:.3f})")
+    print(f"- Opps Min:  {regr_val(0):.2f}")
+    print(f"- Opps Max:  {regr_val(nteams-1):.2f}")
+    print(f"- R-Squared: {lin_regr.rvalue ** 2:.3f}")
 
     # LATER: validate strict ordering of schedule difficulty!!!
     return True
@@ -353,6 +431,7 @@ def validate_bracket(bracket_in: list, nteams: int, nrounds: int) -> bool:
 def print_bracket(bracket: list) -> None:
     """Print human-readable representation of the generated backed (internal format).
     """
+    print("")
     for i, round in enumerate(bracket):
         print(f"\nRound {i + 1}:")
         for j, table in enumerate(round):
@@ -362,6 +441,7 @@ def print_bracket_csv(bracket: list) -> None:
     """Print CSV for generated bracket, compatible with input format expected by
     ``tourn_eval`` (which doesn't really exist yet!).
     """
+    print("\n---")
     for round in bracket:
         print(','.join([str(t + 1) for table in round for t in table]))
 
